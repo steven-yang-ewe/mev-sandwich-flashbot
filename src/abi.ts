@@ -49,27 +49,9 @@ export const UNISWAP_SELL_EXECUTOR_ABI = [
         "internalType": "uint256",
         "name": "amountIn",
         "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "destruct",
-        "type": "uint256"
       }
     ],
     "name": "sB",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "_factoryAddress",
-        "type": "address"
-      }
-    ],
-    "name": "sF",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -99,11 +81,6 @@ export const UNISWAP_SELL_EXECUTOR_ABI = [
       {
         "internalType": "uint256",
         "name": "amountIn",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "destruct",
         "type": "uint256"
       }
     ],

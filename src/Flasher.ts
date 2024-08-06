@@ -9,24 +9,26 @@ import {
 } from "@flashbots/ethers-provider-bundle";
 
 import { bigNumberToDecimal, log } from "./utils";
+import {FlashbotsBundleRawTransaction, FlashbotsBundleTransaction} from "@flashbots/ethers-provider-bundle/src";
+import {TransactionRequest} from "@ethersproject/abstract-provider/src.ts";
 
 let submitted = 0;
 
 export class Flasher {
   private flashbotsProvider: FlashbotsBundleProvider;
-  private bundleExecutorContract: Contract;
+  // private bundleExecutorContract: Contract;
   private executorWallet: Wallet;
-  private sentCount: number;
+  // private sentCount: number;
 
-  constructor(executorWallet: Wallet, flashbotsProvider: FlashbotsBundleProvider, bundleExecutorContract: Contract) {
+  constructor(executorWallet: Wallet, flashbotsProvider: FlashbotsBundleProvider) {//, bundleExecutorContract: Contract
     this.executorWallet = executorWallet;
     this.flashbotsProvider = flashbotsProvider;
-    this.bundleExecutorContract = bundleExecutorContract;
-    this.sentCount = 0;
+    // this.bundleExecutorContract = bundleExecutorContract;
+    // this.sentCount = 0;
   }
 
-  async executeOrder(blockNumber: number, buyTx: Transaction, signedTransaction: string, txHash: string, sellTx: Transaction, baseString: string): Promise<boolean> {
-      const bundledTransactions = [
+  async executeOrder(blockNumber: number, buyTx: TransactionRequest, signedTransaction: string, txHash: string, sellTx: TransactionRequest, baseString: string): Promise<boolean> {
+      const bundledTransactions: Array<FlashbotsBundleTransaction | FlashbotsBundleRawTransaction> = [
           {
               signer: this.executorWallet,
               transaction: buyTx
@@ -48,7 +50,7 @@ export class Flasher {
         const txSimRes = ((simulation as SimulationResponseSuccess).firstRevert as TransactionSimulationRevert);
         if(simulation && !txSimRes) log(`${txHash} Simulation Error on tx, skipping` + (simulation as RelayResponseError).error.message + JSON.stringify(simulation), false);
 
-        if(txSimRes) { // @ts-ignore
+        if(txSimRes) {
             log(`${txHash} Simulation Error on tx, skipping, from: ` + txSimRes.fromAddress + ' ,  ' + txSimRes.revert, false);
         }
         return true;

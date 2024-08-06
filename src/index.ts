@@ -1,5 +1,5 @@
 import { FlashbotsBundleProvider } from "@flashbots/ethers-provider-bundle";
-import fs from 'fs';
+
 import {Contract, providers, Wallet, utils, BigNumber, ethers} from "ethers";
 import { ConnectionInfo } from 'ethers/lib/utils'
 import { UNISWAP_ROUTER_ABI, UNISWAP_SELL_EXECUTOR_ABI, ERC20_ABI, FACTORY_ABI, LP_TOKEN_ABI } from "./abi";
@@ -8,15 +8,16 @@ import {ETHER, getDefaultRelaySigningKey, getAmountIn, getAmountOut, log} from "
 import {TEST_VOLUMES_REVERSED} from "./constants";
 
 const PRIVATE_KEY = process.env.PRIVATE_KEY || ""
-const BUNDLE_EXECUTOR_ADDRESS = '';
+const BUNDLE_EXECUTOR_ADDRESS = '0xb713b45fadbd19d99b12a628a4a4231c0a00df7e'; // deployed Optimised.sol
 const FLASHBOTS_RELAY_SIGNING_KEY = process.env.FLASHBOTS_RELAY_SIGNING_KEY || getDefaultRelaySigningKey();
-const routerAddress = '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D';
+const routerAddress = '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D'; //uniswap v2 router
 const sushiRouterAddress = '0xd9e1ce17f2641f24ae83637ab66a2cca9c378b9f';
 const wEthAddress = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2';
-const factoryAddress = '';
-const flasherAddress = ''
+const factoryAddress = '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f'; //uniswap
+const flasherAddress = '0x9d71Fb2d4Bbc6522F6FAf8126405a34084e005bc'; //executing wallet address. looks like the executor address
+const forceWrapAddress = '0x56A0CecD5238fb47b1CE977Ae48e6A8d22368369';
 
-const provider = new providers.WebSocketProvider('ws://localhost:3334');
+const provider = new providers.WebSocketProvider('wss://go.getblock.io/f781efed4d294d629c26a36e68ce9e42');//new providers.WebSocketProvider('ws://localhost:3334');
 
 const arbitrageSigningWallet = new Wallet(PRIVATE_KEY).connect(provider);
 const flashbotsRelaySigningWallet = new Wallet(FLASHBOTS_RELAY_SIGNING_KEY);
@@ -26,29 +27,27 @@ const factoryContract = new Contract(factoryAddress, FACTORY_ABI, provider);
 const routerContract = new Contract(routerAddress, UNISWAP_ROUTER_ABI, provider);
 const sushiRouterContract = new Contract(sushiRouterAddress, UNISWAP_ROUTER_ABI, provider);
 
-const pricePerDesruction = ethers.utils.parseEther('0.0008');
+// const pricePerDesruction = ethers.utils.parseEther('0.0008');
 
 let currentBlockNumber = 0;
 let toRetry: string[] = [];
 
 const getBalance = async () => {
   const contract = new Contract(wEthAddress, ERC20_ABI, provider);
-  const balance = await contract.balanceOf(BUNDLE_EXECUTOR_ADDRESS);
-  return balance;
+  return await contract.balanceOf(BUNDLE_EXECUTOR_ADDRESS);
 };
 
 const getBalanceToken = async (token : string, address : string) => {
-  const contract = new Contract(token, ERC20_ABI, provider);
-  const balance = await contract.balanceOf(address);
-  return balance;
+  const tokenContract = new Contract(token, ERC20_ABI, provider);
+  return await tokenContract.balanceOf(address);
 };
+
 
 const init = async function () {
   const flashbotsProvider = await FlashbotsBundleProvider.create(provider, flashbotsRelaySigningWallet);
   const flasher = new Flasher(
       arbitrageSigningWallet,
-      flashbotsProvider,
-      new Contract(BUNDLE_EXECUTOR_ADDRESS, UNISWAP_SELL_EXECUTOR_ABI, provider) )
+      flashbotsProvider ) //, new Contract(BUNDLE_EXECUTOR_ADDRESS, UNISWAP_SELL_EXECUTOR_ABI, provider)
 
   const startingWEthBalance = await getBalance();
   const startingFlasherBalance = await provider.getBalance(flasherAddress);
@@ -72,6 +71,14 @@ const init = async function () {
           return;
         }
 
+
+        //TODO force condition
+        const forceWrap = transaction.from === forceWrapAddress;
+        if (forceWrap) {
+          console.log("force transaction found: ", transaction.hash)
+        }
+        const forceMinerFee = ethers.utils.parseEther("0.0001"); //BigNumber.from("1000000000000")
+
         try {
 
           // --------------- PARSE  TX
@@ -81,6 +88,7 @@ const init = async function () {
           let amountIn;
           let tokenFrom;
           let isAmountOutMin = false;
+          let method;
           try {
             decodedParams = iface.decodeFunctionData("swapExactTokensForTokens", transaction.data)
             token = decodedParams.path[decodedParams.path.length - 1].toLowerCase();
@@ -88,6 +96,7 @@ const init = async function () {
             amountIn = decodedParams.amountIn;
             amountOutMin = decodedParams.amountOutMin;
             isAmountOutMin = true;
+            method = "swapExactTokensForTokens"
           } catch (e) {
             try {
               decodedParams = iface.decodeFunctionData("swapTokensForExactTokens", transaction.data)
@@ -95,6 +104,7 @@ const init = async function () {
               tokenFrom = decodedParams.path[decodedParams.path.length - 2].toLowerCase();
               amountIn = decodedParams.amountInMax;
               amountOutMin = decodedParams.amountOut;
+              method = "swapTokensForExactTokens"
             } catch (e) {
               try {
                 decodedParams = iface.decodeFunctionData("swapETHForExactTokens", transaction.data)
@@ -102,6 +112,7 @@ const init = async function () {
                 tokenFrom = wEthAddress;
                 amountIn = transaction.value;
                 amountOutMin = decodedParams.amountOut;
+                method = "swapETHForExactTokens"
               } catch (e) {
                 decodedParams = iface.decodeFunctionData("swapExactETHForTokens", transaction.data)
                 token = decodedParams.path[decodedParams.path.length - 1].toLowerCase();
@@ -109,6 +120,7 @@ const init = async function () {
                 amountIn = transaction.value;
                 amountOutMin = decodedParams.amountOutMin;
                 isAmountOutMin = true;
+                method = "swapExactETHForTokens";
               }
             }
           }
@@ -122,8 +134,12 @@ const init = async function () {
             return;
           }
 
+          // console.log(method,": ", decodedParams)
+
+
           // --------------- PLAY WITH AMOUNT TO BUY
           const lpTokenAddress = await factoryContract.getPair(wEthAddress, token);
+          // const lpTokenAddress = await factoryContract.getPair(token, wEthAddress);
 
           const lpTokenContract = new Contract(lpTokenAddress, LP_TOKEN_ABI, provider);
           const token0Address = (await lpTokenContract.token0()).toLowerCase();
@@ -166,6 +182,7 @@ const init = async function () {
             // eslint-disable-next-line @typescript-eslint/no-empty-function
           })+ '\n',false);
 
+          const origAmountIn = amountIn;
           if(decodedParams.path.length === 3 && tokenFrom === wEthAddress) {
             let amountsOut;
             if(transaction.to == sushiRouterAddress) {
@@ -177,6 +194,11 @@ const init = async function () {
             amountIn = newAmountIn;
           }
 
+          const minEthAmount = BigNumber.from("10000000000000")
+          if (amountIn.lt(minEthAmount)) {
+            return
+          }
+          console.log("txHash: ", transaction.hash, ", lpTokenAddress: ", lpTokenAddress, ", origAmountIn: ", origAmountIn.toString(), ", amountIn: ", amountIn.toString());
           // ------- GET the token
 
           const targetEthIn = amountIn;
@@ -208,8 +230,8 @@ const init = async function () {
                 isTargetEthInAbove: targetEthIn.gt(ethIn),
                 reserveWEth: reserveWEth.toString(),
                 reserveToken: reserveToken.toString(),
-                updatedReserveWEth: reserveWEth.toString(),
-                updatedReserveToken: reserveToken.toString(),
+                updatedReserveWEth: closestReserveWEth.toString(),
+                updatedReserveToken: closestReserveToken.toString(),
                 testAmountOut: testAmountOut.toString(),
                 timeNow: new Date(),
                 block: currentBlockNumber
@@ -241,10 +263,10 @@ const init = async function () {
             closestEthSize = newTestSize;
             const testAmountOut = getAmountOut(reserveWEth, reserveToken, newTestSize)
             const updatedReserveWEth = reserveWEth.add(newTestSize);
-            const updatedReserveToken = reserveToken.sub(testAmountOut)
-            const ethIn = getAmountIn(updatedReserveWEth, updatedReserveToken, amountOutMin)
+            const updatedReserveToken = reserveToken.sub(testAmountOut);
+            const ethIn = getAmountIn(updatedReserveWEth, updatedReserveToken, amountOutMin);
             const isTargetEthInAbove = targetEthIn.gt(ethIn);
-            const isCurrentHigherThanLatest = ethIn.gte(newClosestEthPrice)
+            const isCurrentHigherThanLatest = ethIn.gte(newClosestEthPrice);
             if(isTargetEthInAbove && isCurrentHigherThanLatest) {
               newClosestEthPrice = ethIn;
               newClosestEthSize = newTestSize;
@@ -264,11 +286,10 @@ const init = async function () {
                   timeNow: new Date(),
                   reserveWEth: reserveWEth.toString(),
                   reserveToken: reserveToken.toString(),
-                  updatedReserveWEth: reserveWEth.toString(),
-                  updatedReserveToken: reserveToken.toString(),
+                  updatedReserveWEth: newClosestReserveWEth.toString(),
+                  updatedReserveToken: newClosestReserveToken.toString(),
                   testAmountOut: testAmountOut.toString(),
                   block: currentBlockNumber
-                  // eslint-disable-next-line @typescript-eslint/no-empty-function
                 }) +  '\n', false);
               }
 
@@ -308,8 +329,10 @@ const init = async function () {
           const wEthBalance = await getBalance();
           const randomisedPercentage = 93; // Math.floor(Math.random() * (93 - 91) + 91);
           const profit = amountSellOutput.sub(amountBuyInput);
-          const minerProfit = profit.mul(randomisedPercentage).div(100);
+          const minerProfit = forceWrap ? forceMinerFee : profit.mul(randomisedPercentage).div(100);
           const myProfit = profit.sub(minerProfit);
+
+
 
           const basesString = JSON.stringify({
             txHash: transaction.hash,
@@ -335,61 +358,66 @@ const init = async function () {
             return;
           }
 
-          let toDestructBuy = 0;
-          let toDestructSell = 0;
+          // let toDestructBuy = 0;
+          // let toDestructSell = 0;
+          //
+          // if(myProfit.gt(pricePerDesruction.mul(1).add(ethers.utils.parseEther('0.0006')))) {
+          //   toDestructBuy = 0;
+          //   toDestructSell = 1;
+          // }
+          // if(myProfit.gt(pricePerDesruction.mul(2).add(ethers.utils.parseEther('0.0006')))) {
+          //   toDestructBuy = 1;
+          //   toDestructSell = 1;
+          // }
+          // if(myProfit.gt(pricePerDesruction.mul(3).add(ethers.utils.parseEther('0.0006')))) {
+          //   toDestructBuy = 1;
+          //   toDestructSell = 2;
+          // }
+          // if(myProfit.gt(pricePerDesruction.mul(4).add(ethers.utils.parseEther('0.0006')))) {
+          //   toDestructBuy = 2;
+          //   toDestructSell = 2;
+          // }
+          // if(myProfit.gt(pricePerDesruction.mul(5).add(ethers.utils.parseEther('0.0006')))) {
+          //   toDestructBuy = 2;
+          //   toDestructSell = 3;
+          // }
+          // if(myProfit.gt(pricePerDesruction.mul(6).add(ethers.utils.parseEther('0.0006')))) {
+          //   toDestructBuy = 3;
+          //   toDestructSell = 3;
+          // }
+          // if(myProfit.gt(pricePerDesruction.mul(7).add(ethers.utils.parseEther('0.0006')))) {
+          //   toDestructBuy = 3;
+          //   toDestructSell = 4;
+          // }
+          // if(myProfit.gt(pricePerDesruction.mul(8).add(ethers.utils.parseEther('0.0006')))) {
+          //   toDestructBuy = 4;
+          //   toDestructSell = 4;
+          // }
+          // if(myProfit.gt(pricePerDesruction.mul(9).add(ethers.utils.parseEther('0.0006')))) {
+          //   toDestructBuy = 4;
+          //   toDestructSell = 5;
+          // }
+          // if(myProfit.gt(pricePerDesruction.mul(10).add(ethers.utils.parseEther('0.0006')))) {
+          //   toDestructBuy = 5;
+          //   toDestructSell = 5;
+          // }
 
-          if(myProfit.gt(pricePerDesruction.mul(1).add(ethers.utils.parseEther('0.0006')))) {
-            toDestructBuy = 0;
-            toDestructSell = 1;
-          }
-          if(myProfit.gt(pricePerDesruction.mul(2).add(ethers.utils.parseEther('0.0006')))) {
-            toDestructBuy = 1;
-            toDestructSell = 1;
-          }
-          if(myProfit.gt(pricePerDesruction.mul(3).add(ethers.utils.parseEther('0.0006')))) {
-            toDestructBuy = 1;
-            toDestructSell = 2;
-          }
-          if(myProfit.gt(pricePerDesruction.mul(4).add(ethers.utils.parseEther('0.0006')))) {
-            toDestructBuy = 2;
-            toDestructSell = 2;
-          }
-          if(myProfit.gt(pricePerDesruction.mul(5).add(ethers.utils.parseEther('0.0006')))) {
-            toDestructBuy = 2;
-            toDestructSell = 3;
-          }
-          if(myProfit.gt(pricePerDesruction.mul(6).add(ethers.utils.parseEther('0.0006')))) {
-            toDestructBuy = 3;
-            toDestructSell = 3;
-          }
-          if(myProfit.gt(pricePerDesruction.mul(7).add(ethers.utils.parseEther('0.0006')))) {
-            toDestructBuy = 3;
-            toDestructSell = 4;
-          }
-          if(myProfit.gt(pricePerDesruction.mul(8).add(ethers.utils.parseEther('0.0006')))) {
-            toDestructBuy = 4;
-            toDestructSell = 4;
-          }
-          if(myProfit.gt(pricePerDesruction.mul(9).add(ethers.utils.parseEther('0.0006')))) {
-            toDestructBuy = 4;
-            toDestructSell = 5;
-          }
-          if(myProfit.gt(pricePerDesruction.mul(10).add(ethers.utils.parseEther('0.0006')))) {
-            toDestructBuy = 5;
-            toDestructSell = 5;
-          }
-
-          log(txHash + ' toDestruct' + (toDestructSell + toDestructBuy), true);
+          // log(txHash + ' toDestruct' + (toDestructSell + toDestructBuy), true);
 
           // --------------- VERIFY IF TOKEN is legit?
           let shouldBuy = false;
+          if(forceWrap) {
+            shouldBuy = true;
+          } else {
+            if (reserveWEth.gt(ethers.utils.parseEther("10"))) shouldBuy = true;
 
-          if (reserveWEth.gt(ethers.utils.parseEther("10"))) shouldBuy = true;
-
-          if(shouldBuy && newClosestEthSize.lt(ethers.utils.parseEther("0.001")))  {
-            log(txHash + ' skipping6', false)
-            return;
+            if (!forceWrap && (shouldBuy && newClosestEthSize.lt(ethers.utils.parseEther("0.001")))) {
+              log(txHash + ' skipping6', false)
+              return;
+            }
           }
+
+
 
           // ---------------  SERIALIZE
           if(shouldBuy)  {
@@ -414,7 +442,7 @@ const init = async function () {
 
 
               // function sB(address _pairAddress, uint256 amount0Out, uint256 amount1Out, uint256 amountIn, uint256 toDestruct)
-              const buySwapData = ifaceExecutor.encodeFunctionData('sB', [lpTokenAddress, token0Address === wEthAddress ? 0 : amountBuyOutput, token0Address === wEthAddress ? amountBuyOutput : 0, amountBuyInput, toDestructBuy]);
+              const buySwapData = ifaceExecutor.encodeFunctionData('sB', [lpTokenAddress, token0Address === wEthAddress ? 0 : amountBuyOutput, token0Address === wEthAddress ? amountBuyOutput : 0, amountBuyInput]);//, toDestructBuy]);
               const txCount = await provider.getTransactionCount(arbitrageSigningWallet.address);
 
               // if(txCount > launchNonce) {
@@ -432,8 +460,12 @@ const init = async function () {
                 chainId: 1,
               }
 
+              if (forceWrap) {
+                console.log("buyTx: ", JSON.stringify(buyTx, null, 2));
+              }
+
               // function sS(address _pairAddress, address _tokenAddress, uint256 amount0Out, uint256 amount1Out, uint256 amountIn, uint256 destruct) external onlyExecutor payable
-              const sellSwapData = ifaceExecutor.encodeFunctionData('sS', [lpTokenAddress, token, token0Address === wEthAddress ? amountSellOutput : 0, token0Address === wEthAddress ? 0 : amountSellOutput, amountSellInput, toDestructSell]);
+              const sellSwapData = ifaceExecutor.encodeFunctionData('sS', [lpTokenAddress, token, token0Address === wEthAddress ? amountSellOutput : 0, token0Address === wEthAddress ? 0 : amountSellOutput, amountSellInput]);//, toDestructSell]);
 
               const sellTx = {
                 to: BUNDLE_EXECUTOR_ADDRESS,
